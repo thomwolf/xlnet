@@ -529,10 +529,10 @@ def get_model_fn(n_class):
 
     #### Get loss from inputs
     if FLAGS.is_regression:
-      (total_loss, per_example_loss, hidden_states
+      (total_loss, per_example_loss, hidden_states, special
           ) = function_builder.get_regression_loss(FLAGS, features, is_training)
     else:
-      (total_loss, per_example_loss, hidden_states
+      (total_loss, per_example_loss, hidden_states, special
           ) = function_builder.get_classification_loss(
           FLAGS, features, n_class, is_training)
 
@@ -546,7 +546,7 @@ def get_model_fn(n_class):
     grads = tf.gradients(total_loss, all_vars)
     grads_and_vars = list(zip(grads, all_vars))
 
-    return total_loss, grads_and_vars, features, hidden_states
+    return total_loss, grads_and_vars, features, hidden_states, special
 
   return model_fn
 
@@ -572,24 +572,24 @@ def main(_):
 
   ########################### LOAD PT model
   ########################### LOAD PT model
-  import torch
-  from pytorch_pretrained_bert import CONFIG_NAME, TF_WEIGHTS_NAME, XLNetTokenizer, XLNetConfig, XLNetForSequenceClassification
+#   import torch
+#   from pytorch_pretrained_bert import CONFIG_NAME, TF_WEIGHTS_NAME, XLNetTokenizer, XLNetConfig, XLNetForSequenceClassification
 
-  save_path = os.path.join(FLAGS.model_dir, TF_WEIGHTS_NAME)
-  tf.logging.info("Model loaded from path: {}".format(save_path))
+#   save_path = os.path.join(FLAGS.model_dir, TF_WEIGHTS_NAME)
+#   tf.logging.info("Model loaded from path: {}".format(save_path))
 
-  device = torch.device("cuda", 4)
-  config = XLNetConfig.from_pretrained('xlnet-large-cased', finetuning_task=u'sts-b')
-  config_path = os.path.join(FLAGS.model_dir, CONFIG_NAME)
-  config.to_json_file(config_path)
-  pt_model = XLNetForSequenceClassification.from_pretrained(FLAGS.model_dir, from_tf=True, num_labels=1)
-  pt_model.to(device)
-  pt_model = torch.nn.DataParallel(pt_model, device_ids=[4, 5, 6, 7])
+#   device = torch.device("cuda", 4)
+#   config = XLNetConfig.from_pretrained('xlnet-large-cased', finetuning_task=u'sts-b')
+#   config_path = os.path.join(FLAGS.model_dir, CONFIG_NAME)
+#   config.to_json_file(config_path)
+#   pt_model = XLNetForSequenceClassification.from_pretrained(FLAGS.model_dir, from_tf=True, num_labels=1)
+#   pt_model.to(device)
+#   pt_model = torch.nn.DataParallel(pt_model, device_ids=[4, 5, 6, 7])
 
-  from torch.optim import Adam
-  optimizer = Adam(pt_model.parameters(), lr=0.001, betas=(0.9, 0.999),
-                    eps=FLAGS.adam_epsilon, weight_decay=FLAGS.weight_decay,
-                    amsgrad=False)
+#   from torch.optim import Adam
+#   optimizer = Adam(pt_model.parameters(), lr=0.001, betas=(0.9, 0.999),
+#                     eps=FLAGS.adam_epsilon, weight_decay=FLAGS.weight_decay,
+#                     amsgrad=False)
   ########################### LOAD PT model
   ########################### LOAD PT model
 
@@ -687,14 +687,14 @@ def main(_):
       examples = [example]
 
     ##### Create computational graph
-    tower_losses, tower_grads_and_vars, tower_inputs, tower_hidden_states = [], [], [], []
+    tower_losses, tower_grads_and_vars, tower_inputs, tower_hidden_states, tower_special = [], [], [], [], []
 
     for i in range(FLAGS.num_core_per_host):
       reuse = True if i > 0 else None
       with tf.device(assign_to_gpu(i, "/gpu:0")), \
           tf.variable_scope(tf.get_variable_scope(), reuse=reuse):
 
-        loss_i, grads_and_vars_i, inputs_i, hidden_states_i = single_core_graph(
+        loss_i, grads_and_vars_i, inputs_i, hidden_states_i, special_i = single_core_graph(
             is_training=True,
             features=examples[i],
             label_list=label_list)
@@ -703,6 +703,7 @@ def main(_):
         tower_grads_and_vars.append(grads_and_vars_i)
         tower_inputs.append(inputs_i)
         tower_hidden_states.append(hidden_states_i)
+        tower_special.append(special_i)
 
     ## average losses and gradients across towers
     if len(tower_losses) > 1:
@@ -710,11 +711,13 @@ def main(_):
       grads_and_vars = average_grads_and_vars(tower_grads_and_vars)
       inputs = dict((n, tf.concat([t[n] for t in tower_inputs], 0)) for n in tower_inputs[0])
       hidden_states = list(tf.concat(t, 0) for t in zip(*tower_hidden_states))
+      special = tf.concat(tower_special, 0)
     else:
       loss = tower_losses[0]
       grads_and_vars = tower_grads_and_vars[0]
       inputs = tower_inputs[0]
       hidden_states = tower_hidden_states[0]
+      special = tower_special[0]
 
     # Summaries
     merged = tf.summary.merge_all()
@@ -739,7 +742,7 @@ def main(_):
 
       ########################### LOAD PT model
       import torch
-      from pytorch_pretrained_bert import CONFIG_NAME, TF_WEIGHTS_NAME, XLNetTokenizer, XLNetConfig, XLNetForSequenceClassification
+      from pytorch_pretrained_bert import CONFIG_NAME, TF_WEIGHTS_NAME, WEIGHTS_NAME, XLNetTokenizer, XLNetConfig, XLNetForSequenceClassification
 
       save_path = os.path.join(FLAGS.model_dir, TF_WEIGHTS_NAME)
       saver.save(sess, save_path)
@@ -747,6 +750,7 @@ def main(_):
 
       device = torch.device("cuda", 4)
       config = XLNetConfig.from_pretrained('xlnet-large-cased', finetuning_task=u'sts-b')
+      tokenizer = XLNetTokenizer.from_pretrained('xlnet-large-cased')
       config_path = os.path.join(FLAGS.model_dir, CONFIG_NAME)
       config.to_json_file(config_path)
       pt_model = XLNetForSequenceClassification.from_pretrained(FLAGS.model_dir, from_tf=True, num_labels=1)
@@ -757,9 +761,9 @@ def main(_):
                        eps=FLAGS.adam_epsilon, weight_decay=FLAGS.weight_decay,
                        amsgrad=False)
 
-      fetches = [loss, global_step, gnorm, learning_rate, train_op, merged, inputs, hidden_states]
+      fetches = [loss, global_step, gnorm, learning_rate, train_op, merged, inputs, hidden_states, special]
 
-      total_loss, prev_step = 0., -1
+      total_loss, total_loss_pt, prev_step = 0., 0., -1
       while True:
         feed_dict = {}
         # for i in range(FLAGS.num_core_per_host):
@@ -769,7 +773,7 @@ def main(_):
 
         fetched = sess.run(fetches)
 
-        loss_np, curr_step, gnorm_np, learning_rate_np, _, summary_np, inputs_np, hidden_states_np = fetched
+        loss_np, curr_step, gnorm_np, learning_rate_np, _, summary_np, inputs_np, hidden_states_np, special_np = fetched
         total_loss += loss_np
 
         f_inp = torch.tensor(inputs_np["input_ids"], dtype=torch.long, device=device)
@@ -777,34 +781,61 @@ def main(_):
         f_inp_mask = torch.tensor(inputs_np["input_mask"], dtype=torch.float, device=device)
         f_label = torch.tensor(inputs_np["label_ids"], dtype=torch.float, device=device)
 
-        with torch.no_grad():
-          _, hidden_states_pt, _ = pt_model.transformer(f_inp, f_seg_id, f_inp_mask)
+        # with torch.no_grad():
+        #   _, hidden_states_pt, _ = pt_model.transformer(f_inp, f_seg_id, f_inp_mask)
         # logits_pt, _ = pt_model(f_inp, token_type_ids=f_seg_id, input_mask=f_inp_mask)
 
-        loss_pt, _ = pt_model(f_inp, token_type_ids=f_seg_id, input_mask=f_inp_mask, labels=f_label)
+        pt_model.eval()  # disactivate dropout
+        loss_pt, logits_pt, hidden_states_pt, special_pt, _ = pt_model(f_inp,
+                                                           token_type_ids=f_seg_id,
+                                                           input_mask=f_inp_mask,
+                                                           labels=f_label)
         loss_pt = loss_pt.mean()
+        total_loss_pt += loss_pt.item()
+
+        hidden_states_pt = list(t.detach().cpu().numpy() for t in hidden_states_pt)
+        special_pt = special_pt.detach().cpu().numpy()
 
         # Optimizer pt
         pt_model.zero_grad()
         loss_pt.backward()
-        torch.nn.utils.clip_grad_norm_(pt_model.parameters(), FLAGS.clip)
+        gnorm_pt = torch.nn.utils.clip_grad_norm_(pt_model.parameters(), FLAGS.clip)
         for param_group in optimizer.param_groups:
             param_group['lr'] = learning_rate_np
         optimizer.step()
 
         if curr_step > 0 and curr_step % FLAGS.iterations == 0:
           curr_loss = total_loss / (curr_step - prev_step)
+          curr_loss_pt = total_loss_pt / (curr_step - prev_step)
           tf.logging.info("[{}] | gnorm {:.2f} lr {:8.6f} "
               "| loss {:.2f} | pplx {:>7.2f}, bpc {:>7.4f}".format(
               curr_step, gnorm_np, learning_rate_np,
               curr_loss, math.exp(curr_loss), curr_loss / math.log(2)))
-          total_loss, prev_step = 0., curr_step
+          tf.logging.info("[{}] | gnorm {:.2f} lr {:8.6f} "
+              "| loss PT {:.2f} | pplx PT {:>7.2f}, bpc {:>7.4f}".format(
+              curr_step, gnorm_pt, learning_rate_np,
+              curr_loss_pt, math.exp(curr_loss_pt), curr_loss_pt / math.log(2)))
+          total_loss, total_loss_pt, prev_step = 0., 0., curr_step
           writer.add_summary(summary_np, global_step=curr_step)
 
         if curr_step > 0 and curr_step % FLAGS.save_steps == 0:
           save_path = os.path.join(FLAGS.model_dir, "model.ckpt-{}".format(curr_step))
           saver.save(sess, save_path)
           tf.logging.info("Model saved in path: {}".format(save_path))
+
+          # Save a trained model, configuration and tokenizer
+          model_to_save = pt_model.module if hasattr(pt_model, 'module') else pt_model  # Only save the model it-self
+          # If we save using the predefined names, we can load using `from_pretrained`
+          output_dir = os.path.join(FLAGS.output_dir, "pytorch-ckpt-{}".format(curr_step))
+          if not tf.gfile.Exists(output_dir):
+            tf.gfile.MakeDirs(output_dir)
+          output_model_file = os.path.join(output_dir, WEIGHTS_NAME)
+          output_config_file = os.path.join(output_dir, CONFIG_NAME)
+
+          torch.save(model_to_save.state_dict(), output_model_file)
+          model_to_save.config.to_json_file(output_config_file)
+          tokenizer.save_vocabulary(output_dir)
+          tf.logging.info("PyTorch Model saved in path: {}".format(output_dir))
 
         if curr_step >= FLAGS.train_steps:
           break

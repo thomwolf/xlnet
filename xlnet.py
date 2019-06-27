@@ -194,7 +194,7 @@ class XLNetModel(object):
         ff_activation=xlnet_config.ff_activation,
         untie_r=xlnet_config.untie_r,
 
-        is_training=run_config.is_training,
+        is_training=False,  # run_config.is_training,
         use_bfloat16=run_config.use_bfloat16,
         use_tpu=run_config.use_tpu,
         dropout=run_config.dropout,
@@ -218,7 +218,7 @@ class XLNetModel(object):
     tfm_args.update(input_args)
 
     with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
-      (self.output, self.new_mems, self.lookup_table, self.hidden_states
+      (self.output, self.new_mems, self.lookup_table, self.hidden_states, self.special,
           ) = modeling.transformer_xl(**tfm_args)
 
     self.input_mask = input_mask
@@ -272,7 +272,7 @@ class XLNetModel(object):
       representation of XLNet.
     """
 
-    return self.hidden_states
+    return self.hidden_states, self.special
 
   def get_new_memory(self):
     """

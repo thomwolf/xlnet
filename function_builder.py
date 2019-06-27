@@ -196,7 +196,7 @@ def get_regression_loss(
 
   summary = xlnet_model.get_pooled_out(FLAGS.summary_type, FLAGS.use_summ_proj)
 
-  hidden_states = xlnet_model.get_hidden_states_out()
+  hidden_states, special = xlnet_model.get_hidden_states_out()
 
   with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
     per_example_loss, logits = modeling.regression_loss(
@@ -208,7 +208,7 @@ def get_regression_loss(
 
     total_loss = tf.reduce_mean(per_example_loss)
 
-    return total_loss, per_example_loss, hidden_states
+    return total_loss, per_example_loss, hidden_states, special
 
 
 def get_qa_outputs(FLAGS, features, is_training):
