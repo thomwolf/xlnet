@@ -61,6 +61,8 @@ flags.DEFINE_float("init_std", default=0.02,
       help="Initialization std when init is normal.")
 flags.DEFINE_float("init_range", default=0.1,
       help="Initialization std when init is uniform.")
+flags.DEFINE_integer("iterations", default=1000,
+      help="number of iterations per TPU training loop.")
 
 # I/O paths
 flags.DEFINE_bool("overwrite_data", default=False,
@@ -95,8 +97,6 @@ flags.DEFINE_bool("do_train", default=False, help="whether to do training")
 flags.DEFINE_integer("train_steps", default=1000,
       help="Number of training steps")
 flags.DEFINE_integer("warmup_steps", default=0, help="number of warmup steps")
-flags.DEFINE_integer("iterations", default=100,
-      help="Number of iterations per repeat loop.")
 flags.DEFINE_float("learning_rate", default=1e-5, help="initial learning rate")
 flags.DEFINE_float("lr_layer_decay_rate", 1.0,
                    "Top layer: lr[L] = FLAGS.learning_rate."
@@ -574,13 +574,13 @@ def main(_):
       ptvsd.wait_for_attach()
 
   tf.set_random_seed(FLAGS.seed)
-  numpy.random.seed(FLAGS.seed)
+  np.random.seed(FLAGS.seed)
 
   tf.logging.set_verbosity(tf.logging.INFO)
 
   #### Validate flags
   if FLAGS.save_steps is not None:
-    FLAGS.iterations = min(FLAGS.iterations, FLAGS.save_steps)
+    FLAGS.log_step_count_steps = min(FLAGS.log_step_count_steps, FLAGS.save_steps)
 
   if FLAGS.do_predict:
     predict_dir = FLAGS.predict_dir
@@ -823,7 +823,7 @@ def main(_):
         ##### PYTORCH
         #########
 
-        if curr_step > 0 and curr_step % FLAGS.iterations == 0:
+        if curr_step > 0 and curr_step % FLAGS.log_step_count_steps == 0:
           curr_loss = total_loss / (curr_step - prev_step)
           curr_loss_pt = total_loss_pt / (curr_step - prev_step)
           tf.logging.info("[{}] | gnorm {:.2f} lr {:8.6f} "
