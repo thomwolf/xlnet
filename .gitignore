@@ -106,3 +106,4 @@ venv.bak/
 # Thom
 .vscode
 proc_data/
+results/
