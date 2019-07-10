@@ -419,7 +419,7 @@ def file_based_convert_examples_to_features(
 
   writer = tf.python_io.TFRecordWriter(output_file)
 
-  np.random.shuffle(examples)
+#   np.random.shuffle(examples)
   if num_passes > 1:
     examples *= num_passes
 
@@ -508,7 +508,7 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
     # For training, we want a lot of parallel reading and shuffling.
     # For eval, we want no shuffling and parallel reading doesn't matter.
     if is_training:
-      d = d.shuffle(buffer_size=FLAGS.shuffle_buffer)
+    #   d = d.shuffle(buffer_size=FLAGS.shuffle_buffer)
       d = d.repeat()
 
     d = d.apply(
@@ -753,7 +753,8 @@ def main(_):
       tokenizer = XLNetTokenizer.from_pretrained('xlnet-large-cased')
       config_path = os.path.join(FLAGS.model_dir, CONFIG_NAME)
       config.to_json_file(config_path)
-      pt_model = XLNetForSequenceClassification.from_pretrained(FLAGS.model_dir, from_tf=True, num_labels=1)
+      pt_model = XLNetForSequenceClassification.from_pretrained('xlnet-large-cased', num_labels=1)
+    #   pt_model = XLNetForSequenceClassification.from_pretrained(FLAGS.model_dir, from_tf=True, num_labels=1)
       pt_model.to(device)
       pt_model = torch.nn.DataParallel(pt_model, device_ids=[4, 5, 6, 7])
       from torch.optim import Adam
@@ -786,15 +787,15 @@ def main(_):
         # logits_pt, _ = pt_model(f_inp, token_type_ids=f_seg_id, input_mask=f_inp_mask)
 
         pt_model.eval()  # disactivate dropout
-        loss_pt, logits_pt, hidden_states_pt, special_pt, _ = pt_model(f_inp,
+        loss_pt, _ = pt_model(f_inp,
                                                            token_type_ids=f_seg_id,
                                                            input_mask=f_inp_mask,
                                                            labels=f_label)
         loss_pt = loss_pt.mean()
         total_loss_pt += loss_pt.item()
 
-        hidden_states_pt = list(t.detach().cpu().numpy() for t in hidden_states_pt)
-        special_pt = special_pt.detach().cpu().numpy()
+        # hidden_states_pt = list(t.detach().cpu().numpy() for t in hidden_states_pt)
+        # special_pt = special_pt.detach().cpu().numpy()
 
         # Optimizer pt
         pt_model.zero_grad()
