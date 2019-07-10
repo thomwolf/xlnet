@@ -50,6 +50,7 @@ def configure_tpu(FLAGS):
           per_host_input_for_training=per_host_input),
       keep_checkpoint_max=FLAGS.max_save,
       save_checkpoints_secs=None,
+      log_step_count_steps=FLAGS.log_step_count_steps,
       save_checkpoints_steps=FLAGS.save_steps,
       train_distribute=strategy
   )

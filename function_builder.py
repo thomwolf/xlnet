@@ -208,7 +208,7 @@ def get_regression_loss(
 
     total_loss = tf.reduce_mean(per_example_loss)
 
-    return total_loss, per_example_loss, hidden_states, special
+    return total_loss, per_example_loss, logits, hidden_states, special
 
 
 def get_qa_outputs(FLAGS, features, is_training):

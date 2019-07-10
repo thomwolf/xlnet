@@ -14,11 +14,11 @@ def _get_initializer(FLAGS):
     initializer = tf.initializers.random_uniform(
         minval=-FLAGS.init_range,
         maxval=FLAGS.init_range,
-        seed=None)
+        seed=FLAGS.seed)
   elif FLAGS.init == "normal":
     initializer = tf.initializers.random_normal(
         stddev=FLAGS.init_std,
-        seed=None)
+        seed=FLAGS.seed)
   else:
     raise ValueError("Initializer {} not supported".format(FLAGS.init))
   return initializer
@@ -88,7 +88,8 @@ def create_run_config(is_training, is_finetune, FLAGS):
       init=FLAGS.init,
       init_range=FLAGS.init_range,
       init_std=FLAGS.init_std,
-      clamp_len=FLAGS.clamp_len)
+      clamp_len=FLAGS.clamp_len,
+      seed=FLAGS.seed)
 
   if not is_finetune:
     kwargs.update(dict(
@@ -110,7 +111,8 @@ class RunConfig(object):
 
   def __init__(self, is_training, use_tpu, use_bfloat16, dropout, dropatt,
                init="normal", init_range=0.1, init_std=0.02, mem_len=None,
-               reuse_len=None, bi_data=False, clamp_len=-1, same_length=False):
+               reuse_len=None, bi_data=False, clamp_len=-1, same_length=False,
+               seed=None):
     """
     Args:
       is_training: bool, whether in training mode.
@@ -146,6 +148,7 @@ class RunConfig(object):
     self.bi_data = bi_data
     self.clamp_len = clamp_len
     self.same_length = same_length
+    self.seed = seed
 
 
 class XLNetModel(object):

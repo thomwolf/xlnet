@@ -97,6 +97,8 @@ flags.DEFINE_float("min_lr_ratio", default=0.0,
 flags.DEFINE_float("clip", default=1.0, help="Gradient clipping")
 flags.DEFINE_integer("max_save", default=0,
       help="Max number of checkpoints to save. Use 0 to save all.")
+flags.DEFINE_integer("log_step_count_steps", default=100,
+      help="Log every X steps.")
 flags.DEFINE_integer("save_steps", default=None,
       help="Save the model for every save_steps. "
       "If None, not to save any model.")
@@ -105,6 +107,8 @@ flags.DEFINE_integer("train_batch_size", default=8,
 flags.DEFINE_float("weight_decay", default=0.00, help="Weight decay rate")
 flags.DEFINE_float("adam_epsilon", default=1e-8, help="Adam epsilon")
 flags.DEFINE_string("decay_method", default="poly", help="poly or cos")
+flags.DEFINE_integer("seed", default=42,
+      help="Seed.")
 
 # evaluation
 flags.DEFINE_bool("do_eval", default=False, help="whether to do eval")
@@ -137,6 +141,9 @@ flags.DEFINE_string("cls_scope", default=None,
       help="Classifier layer scope.")
 flags.DEFINE_bool("is_regression", default=False,
       help="Whether it's a regression task.")
+
+flags.DEFINE_string('server_ip', default='', help="Can be used for distant debugging.")
+flags.DEFINE_string('server_port', default='', help="Can be used for distant debugging.")
 
 FLAGS = flags.FLAGS
 
@@ -406,7 +413,7 @@ def file_based_convert_examples_to_features(
 
   writer = tf.python_io.TFRecordWriter(output_file)
 
-  np.random.shuffle(examples)
+#   np.random.shuffle(examples)
   if num_passes > 1:
     examples *= num_passes
 
@@ -495,7 +502,7 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
     # For training, we want a lot of parallel reading and shuffling.
     # For eval, we want no shuffling and parallel reading doesn't matter.
     if is_training:
-      d = d.shuffle(buffer_size=FLAGS.shuffle_buffer)
+    #   d = d.shuffle(buffer_size=FLAGS.shuffle_buffer)
       d = d.repeat()
 
     d = d.apply(
@@ -516,10 +523,10 @@ def get_model_fn(n_class):
 
     #### Get loss from inputs
     if FLAGS.is_regression:
-      (total_loss, per_example_loss, logits
+      (total_loss, per_example_loss, logits, hidden_states, special
           ) = function_builder.get_regression_loss(FLAGS, features, is_training)
     else:
-      (total_loss, per_example_loss, logits
+      (total_loss, per_example_loss, logits, hidden_states, special
           ) = function_builder.get_classification_loss(
           FLAGS, features, n_class, is_training)
 
@@ -637,6 +644,16 @@ def get_model_fn(n_class):
 
 
 def main(_):
+  if FLAGS.server_ip and FLAGS.server_port:
+      # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
+      import ptvsd
+      print("Waiting for debugger attach")
+      ptvsd.enable_attach(address=(FLAGS.server_ip, FLAGS.server_port), redirect_output=True)
+      ptvsd.wait_for_attach()
+
+  tf.set_random_seed(FLAGS.seed)
+  numpy.random.seed(FLAGS.seed)
+
   tf.logging.set_verbosity(tf.logging.INFO)
 
   #### Validate flags
