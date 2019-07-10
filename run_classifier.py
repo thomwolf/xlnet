@@ -605,7 +605,7 @@ def get_model_fn(n_class):
       return output_spec
 
     #### Configuring the optimizer
-    train_op, learning_rate, _ = model_utils.get_train_op(FLAGS, total_loss)
+    train_op, learning_rate, gnorm = model_utils.get_train_op(FLAGS, total_loss)
 
     tf.summary.scalar('learning_rate', learning_rate)
 
@@ -635,8 +635,9 @@ def get_model_fn(n_class):
           mode=mode, loss=total_loss, train_op=train_op, host_call=host_call,
           scaffold_fn=scaffold_fn)
     else:
+      hook = tf.train.LoggingTensorHook({"gnorm": gnorm}, every_n_iter=FLAGS.log_step_count_steps)
       train_spec = tf.estimator.EstimatorSpec(
-          mode=mode, loss=total_loss, train_op=train_op)
+          mode=mode, loss=total_loss, train_op=train_op, training_chief_hooks=[hook])
 
     return train_spec
 
@@ -652,7 +653,7 @@ def main(_):
       ptvsd.wait_for_attach()
 
   tf.set_random_seed(FLAGS.seed)
-  numpy.random.seed(FLAGS.seed)
+  np.random.seed(FLAGS.seed)
 
   tf.logging.set_verbosity(tf.logging.INFO)
 
