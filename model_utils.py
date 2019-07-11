@@ -52,6 +52,7 @@ def configure_tpu(FLAGS):
       save_checkpoints_secs=None,
       log_step_count_steps=FLAGS.log_step_count_steps,
       save_checkpoints_steps=FLAGS.save_steps,
+      keep_checkpoint_max=FLAGS.keep_checkpoint_max,
       train_distribute=strategy
   )
   return run_config

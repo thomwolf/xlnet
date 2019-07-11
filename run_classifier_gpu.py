@@ -424,7 +424,7 @@ def file_based_convert_examples_to_features(
 
   writer = tf.python_io.TFRecordWriter(output_file)
 
-#   np.random.shuffle(examples)
+    #   np.random.shuffle(examples)
   if num_passes > 1:
     examples *= num_passes
 
@@ -551,7 +551,7 @@ def get_model_fn(n_class):
     grads = tf.gradients(total_loss, all_vars)
     grads_and_vars = list(zip(grads, all_vars))
 
-    return total_loss, grads_and_vars, features, hidden_states, special
+    return total_loss, grads_and_vars, features, hidden_states, logits
 
   return model_fn
 
@@ -695,14 +695,14 @@ def main(_):
       examples = [example]
 
     ##### Create computational graph
-    tower_losses, tower_grads_and_vars, tower_inputs, tower_hidden_states, tower_special = [], [], [], [], []
+    tower_losses, tower_grads_and_vars, tower_inputs, tower_hidden_states, tower_logits = [], [], [], [], []
 
     for i in range(FLAGS.num_core_per_host):
       reuse = True if i > 0 else None
       with tf.device(assign_to_gpu(i, "/gpu:0")), \
           tf.variable_scope(tf.get_variable_scope(), reuse=reuse):
 
-        loss_i, grads_and_vars_i, inputs_i, hidden_states_i, special_i = single_core_graph(
+        loss_i, grads_and_vars_i, inputs_i, hidden_states_i, logits_i = single_core_graph(
             is_training=True,
             features=examples[i],
             label_list=label_list)
@@ -711,7 +711,7 @@ def main(_):
         tower_grads_and_vars.append(grads_and_vars_i)
         tower_inputs.append(inputs_i)
         tower_hidden_states.append(hidden_states_i)
-        tower_special.append(special_i)
+        tower_logits.append(logits_i)
 
     ## average losses and gradients across towers
     if len(tower_losses) > 1:
@@ -719,13 +719,13 @@ def main(_):
       grads_and_vars = average_grads_and_vars(tower_grads_and_vars)
       inputs = dict((n, tf.concat([t[n] for t in tower_inputs], 0)) for n in tower_inputs[0])
       hidden_states = list(tf.concat(t, 0) for t in zip(*tower_hidden_states))
-      special = tf.concat(tower_special, 0)
+      logits = tf.concat(tower_logits, 0)
     else:
       loss = tower_losses[0]
       grads_and_vars = tower_grads_and_vars[0]
       inputs = tower_inputs[0]
       hidden_states = tower_hidden_states[0]
-      special = tower_special[0]
+      logits = tower_logits[0]
 
     # Summaries
     merged = tf.summary.merge_all()
@@ -736,7 +736,7 @@ def main(_):
     global_step = tf.train.get_global_step()
 
     ##### Training loop
-    saver = tf.train.Saver()
+    saver = tf.train.Saver(max_to_keep=FLAGS.max_save)
 
     gpu_options = tf.GPUOptions(allow_growth=True)
 
@@ -744,6 +744,163 @@ def main(_):
     model_utils.init_from_checkpoint(FLAGS, global_vars=True)
 
     writer = tf.summary.FileWriter(logdir=FLAGS.model_dir, graph=tf.get_default_graph())
+    with tf.Session(config=tf.ConfigProto(allow_soft_placement=True,
+        gpu_options=gpu_options)) as sess:
+      sess.run(tf.global_variables_initializer())
+
+
+      #########
+      ##### PYTORCH
+      import torch
+      from torch.optim import Adam
+      from pytorch_transformers import CONFIG_NAME, TF_WEIGHTS_NAME, WEIGHTS_NAME, XLNetTokenizer, XLNetConfig, XLNetForSequenceClassification, BertAdam
+
+      save_path = os.path.join(FLAGS.model_dir, TF_WEIGHTS_NAME + '-00')
+      saver.save(sess, save_path)
+      tf.logging.info("Model saved in path: {}".format(save_path))
+
+      device = torch.device("cuda", 4)
+      config = XLNetConfig.from_pretrained('xlnet-large-cased', finetuning_task=u'sts-b', num_labels=1)
+      tokenizer = XLNetTokenizer.from_pretrained('xlnet-large-cased')
+
+      # pt_model = XLNetForSequenceClassification.from_pretrained('xlnet-large-cased', num_labels=1)
+      pt_model = XLNetForSequenceClassification.from_pretrained(save_path, from_tf=True, config=config)
+      pt_model.to(device)
+      pt_model = torch.nn.DataParallel(pt_model, device_ids=[4, 5, 6, 7])
+
+      optimizer = Adam(pt_model.parameters(), lr=0.001, betas=(0.9, 0.999),
+                       eps=FLAGS.adam_epsilon, weight_decay=FLAGS.weight_decay,
+                       amsgrad=False)
+      # optimizer = BertAdam(pt_model.parameters(), lr=FLAGS.learning_rate, t_total=FLAGS.train_steps, warmup=FLAGS.warmup_steps / FLAGS.train_steps,
+      #                      eps=FLAGS.adam_epsilon, weight_decay=FLAGS.weight_decay)
+      ##### PYTORCH
+      #########
+
+      fetches = [loss, global_step, gnorm, learning_rate, train_op, merged, inputs, hidden_states, logits]
+
+      total_loss, total_loss_pt, prev_step, gnorm_pt = 0., 0., -1, 0.0
+      total_logits = None
+      total_labels = None
+      while True:
+        feed_dict = {}
+        # for i in range(FLAGS.num_core_per_host):
+        #   for key in tower_mems_np[i].keys():
+        #     for m, m_np in zip(tower_mems[i][key], tower_mems_np[i][key]):
+        #       feed_dict[m] = m_np
+
+        fetched = sess.run(fetches)
+
+        loss_np, curr_step, gnorm_np, learning_rate_np, _, summary_np, inputs_np, hidden_states_np, logits_np = fetched
+        total_loss += loss_np
+
+        if total_logits is None:
+            total_logits = logits_np
+            total_labels = inputs_np['label_ids']
+        else:
+            total_logits = np.append(total_logits, logits_np, axis=0)
+            total_labels = np.append(total_labels, inputs_np['label_ids'], axis=0)
+
+        #########
+        ##### PYTORCH
+        f_inp = torch.tensor(inputs_np["input_ids"], dtype=torch.long, device=device)
+        f_seg_id = torch.tensor(inputs_np["segment_ids"], dtype=torch.long, device=device)
+        f_inp_mask = torch.tensor(inputs_np["input_mask"], dtype=torch.float, device=device)
+        f_label = torch.tensor(inputs_np["label_ids"], dtype=torch.float, device=device)
+
+        # with torch.no_grad():
+        #   _, hidden_states_pt, _ = pt_model.transformer(f_inp, f_seg_id, f_inp_mask)
+        # logits_pt, _ = pt_model(f_inp, token_type_ids=f_seg_id, input_mask=f_inp_mask)
+
+        pt_model.train()
+        outputs = pt_model(f_inp, token_type_ids=f_seg_id, input_mask=f_inp_mask, labels=f_label)
+        loss_pt = outputs[0]
+        loss_pt = loss_pt.mean()
+        total_loss_pt += loss_pt.item()
+
+        # # hidden_states_pt = list(t.detach().cpu().numpy() for t in hidden_states_pt)
+        # # special_pt = special_pt.detach().cpu().numpy()
+
+        # # Optimizer pt
+        pt_model.zero_grad()
+        loss_pt.backward()
+        gnorm_pt = torch.nn.utils.clip_grad_norm_(pt_model.parameters(), FLAGS.clip)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = learning_rate_np
+        optimizer.step()
+        ##### PYTORCH
+        #########
+
+        if curr_step > 0 and curr_step % FLAGS.log_step_count_steps == 0:
+          curr_loss = total_loss / (curr_step - prev_step)
+          curr_loss_pt = total_loss_pt / (curr_step - prev_step)
+          tf.logging.info("[{}] | gnorm {:.2f} lr {:8.6f} "
+              "| loss {:.2f} | pplx {:>7.2f}, bpc {:>7.4f}".format(
+              curr_step, gnorm_np, learning_rate_np,
+              curr_loss, math.exp(curr_loss), curr_loss / math.log(2)))
+
+          #########
+          ##### PYTORCH
+          tf.logging.info("  PT [{}] | gnorm PT {:.2f} lr PT {:8.6f} "
+              "| loss PT {:.2f} | pplx PT {:>7.2f}, bpc PT {:>7.4f}".format(
+              curr_step, gnorm_pt, learning_rate_np,
+              curr_loss_pt, math.exp(curr_loss_pt), curr_loss_pt / math.log(2)))
+          ##### PYTORCH
+          #########
+
+          total_loss, total_loss_pt, prev_step = 0., 0., curr_step
+          writer.add_summary(summary_np, global_step=curr_step)
+
+        if curr_step > 0 and curr_step % FLAGS.save_steps == 0:
+          save_path = os.path.join(FLAGS.model_dir, "model.ckpt-{}".format(curr_step))
+          saver.save(sess, save_path)
+          tf.logging.info("Model saved in path: {}".format(save_path))
+
+          #########
+          ##### PYTORCH
+          # Save a trained model, configuration and tokenizer
+          model_to_save = pt_model.module if hasattr(pt_model, 'module') else pt_model  # Only save the model it-self
+          # If we save using the predefined names, we can load using `from_pretrained`
+          output_dir = os.path.join(FLAGS.output_dir, "pytorch-ckpt-{}".format(curr_step))
+          if not tf.gfile.Exists(output_dir):
+            tf.gfile.MakeDirs(output_dir)
+          model_to_save.save_pretrained(output_dir)
+          tokenizer.save_pretrained(output_dir)
+          tf.logging.info("PyTorch Model saved in path: {}".format(output_dir))
+          ##### PYTORCH
+          #########
+
+        if curr_step >= FLAGS.train_steps:
+          break
+
+
+  if FLAGS.do_eval:
+    # TPU requires a fixed batch size for all batches, therefore the number
+    # of examples must be a multiple of the batch size, or else examples
+    # will get dropped. So we pad with fake examples which are ignored
+    # later on. These do NOT count towards the metric (all tf.metrics
+    # support a per-instance weight, and these get a weight of 0.0).
+    #
+    # Modified in XL: We also adopt the same mechanism for GPUs.
+    while len(eval_examples) % FLAGS.eval_batch_size != 0:
+      eval_examples.append(PaddingInputExample())
+
+    eval_file_base = "{}.len-{}.{}.eval.tf_record".format(
+        spm_basename, FLAGS.max_seq_length, FLAGS.eval_split)
+    eval_file = os.path.join(FLAGS.output_dir, eval_file_base)
+
+    file_based_convert_examples_to_features(
+        eval_examples, label_list, FLAGS.max_seq_length, tokenize_fn,
+        eval_file)
+
+    assert len(eval_examples) % FLAGS.eval_batch_size == 0
+    eval_steps = int(len(eval_examples) // FLAGS.eval_batch_size)
+
+    eval_input_fn = file_based_input_fn_builder(
+        input_file=eval_file,
+        seq_length=FLAGS.max_seq_length,
+        is_training=False,
+        drop_remainder=True)
+
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True,
         gpu_options=gpu_options)) as sess:
       sess.run(tf.global_variables_initializer())
@@ -776,9 +933,11 @@ def main(_):
         ##### PYTORCH
         #########
 
-      fetches = [loss, global_step, gnorm, learning_rate, train_op, merged, inputs, hidden_states, special]
+      fetches = [loss, global_step, gnorm, learning_rate, train_op, merged, inputs, hidden_states, logits]
 
       total_loss, total_loss_pt, prev_step, gnorm_pt = 0., 0., -1, 0.0
+      total_logits = None
+      total_labels = None
       while True:
         feed_dict = {}
         # for i in range(FLAGS.num_core_per_host):
@@ -788,82 +947,15 @@ def main(_):
 
         fetched = sess.run(fetches)
 
-        loss_np, curr_step, gnorm_np, learning_rate_np, _, summary_np, inputs_np, hidden_states_np, special_np = fetched
+        loss_np, curr_step, gnorm_np, learning_rate_np, _, summary_np, inputs_np, hidden_states_np, logits_np = fetched
         total_loss += loss_np
 
-        #########
-        ##### PYTORCH
-
-        # f_inp = torch.tensor(inputs_np["input_ids"], dtype=torch.long, device=device)
-        # f_seg_id = torch.tensor(inputs_np["segment_ids"], dtype=torch.long, device=device)
-        # f_inp_mask = torch.tensor(inputs_np["input_mask"], dtype=torch.float, device=device)
-        # f_label = torch.tensor(inputs_np["label_ids"], dtype=torch.float, device=device)
-
-        # with torch.no_grad():
-        #   _, hidden_states_pt, _ = pt_model.transformer(f_inp, f_seg_id, f_inp_mask)
-        # logits_pt, _ = pt_model(f_inp, token_type_ids=f_seg_id, input_mask=f_inp_mask)
-
-        # pt_model.eval()  # disactivate dropout
-        # outputs = pt_model(f_inp, token_type_ids=f_seg_id, input_mask=f_inp_mask, labels=f_label)
-        # loss_pt = outputs[0]
-        # loss_pt = loss_pt.mean()
-        # total_loss_pt += loss_pt.item()
-
-        # # hidden_states_pt = list(t.detach().cpu().numpy() for t in hidden_states_pt)
-        # # special_pt = special_pt.detach().cpu().numpy()
-
-        # # Optimizer pt
-        # pt_model.zero_grad()
-        # loss_pt.backward()
-        # gnorm_pt = torch.nn.utils.clip_grad_norm_(pt_model.parameters(), FLAGS.clip)
-        # for param_group in optimizer.param_groups:
-        #     param_group['lr'] = learning_rate_np
-        # optimizer.step()
-
-        ##### PYTORCH
-        #########
-
-        if curr_step > 0 and curr_step % FLAGS.log_step_count_steps == 0:
-          curr_loss = total_loss / (curr_step - prev_step)
-          curr_loss_pt = total_loss_pt / (curr_step - prev_step)
-          tf.logging.info("[{}] | gnorm {:.2f} lr {:8.6f} "
-              "| loss {:.2f} | pplx {:>7.2f}, bpc {:>7.4f}".format(
-              curr_step, gnorm_np, learning_rate_np,
-              curr_loss, math.exp(curr_loss), curr_loss / math.log(2)))
-
-          tf.logging.info("[{}] | gnorm {:.2f} lr {:8.6f} "
-              "| loss PT {:.2f} | pplx PT {:>7.2f}, bpc {:>7.4f}".format(
-              curr_step, gnorm_pt, learning_rate_np,
-              curr_loss_pt, math.exp(curr_loss_pt), curr_loss_pt / math.log(2)))
-
-          total_loss, total_loss_pt, prev_step = 0., 0., curr_step
-          writer.add_summary(summary_np, global_step=curr_step)
-
-        if curr_step > 0 and curr_step % FLAGS.save_steps == 0:
-          save_path = os.path.join(FLAGS.model_dir, "model.ckpt-{}".format(curr_step))
-          saver.save(sess, save_path)
-          tf.logging.info("Model saved in path: {}".format(save_path))
-
-          # Save a trained model, configuration and tokenizer
-          model_to_save = pt_model.module if hasattr(pt_model, 'module') else pt_model  # Only save the model it-self
-          # If we save using the predefined names, we can load using `from_pretrained`
-          output_dir = os.path.join(FLAGS.output_dir, "pytorch-ckpt-{}".format(curr_step))
-          if not tf.gfile.Exists(output_dir):
-            tf.gfile.MakeDirs(output_dir)
-          output_model_file = os.path.join(output_dir, WEIGHTS_NAME)
-          output_config_file = os.path.join(output_dir, CONFIG_NAME)
-
-        #########
-        ##### PYTORCH
-        #   torch.save(model_to_save.state_dict(), output_model_file)
-        #   model_to_save.config.to_json_file(output_config_file)
-        #   tokenizer.save_vocabulary(output_dir)
-        #   tf.logging.info("PyTorch Model saved in path: {}".format(output_dir))
-        ##### PYTORCH
-        #########
-
-        if curr_step >= FLAGS.train_steps:
-          break
+        if total_logits is None:
+            total_logits = logits_np
+            total_labels = inputs_np['label_ids']
+        else:
+            total_logits = np.append(total_logits, logits_np, axis=0)
+            total_labels = np.append(total_labels, inputs_np['label_ids'], axis=0)
 
 if __name__ == "__main__":
   tf.app.run()
